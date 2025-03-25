@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 from cryptography.fernet import Fernet
@@ -5,7 +6,12 @@ from cryptography.fernet import Fernet
 # Server configuration
 HOST = '127.0.0.1'
 PORT = 5555
-SERVER_PASSWORD = "chat123"
+
+# Retrieve server password from environment variable
+SERVER_PASSWORD = os.getenv("CHAT_SERVER_PASSWORD")
+
+if not SERVER_PASSWORD:
+    raise ValueError("SERVER_PASSWORD is not set. Please configure it as an environment variable.")
 
 # Generate encryption key
 encryption_key = Fernet.generate_key()
