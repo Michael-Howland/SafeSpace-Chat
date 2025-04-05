@@ -1,94 +1,73 @@
 import socket
-import threading
 from cryptography.fernet import Fernet
-import getpass  # Secure password input
+import threading
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MASTER_KEY_FILE = os.path.join(BASE_DIR, "master.key")
 
 def display_welcome_message():
-    """Displays a simple ASCII-style welcome message."""
     print("\n" + "=" * 40)
     print("         WELCOME TO SAFESPACE         ")
     print("=" * 40)
     print("A Secure Chat Platform\n")
 
-def receive_messages(client_socket, cipher):
-    """Handles receiving and decrypting messages from the server."""
+def load_master_key():
+    """Loads the master key from file."""
+    try:
+        with open(MASTER_KEY_FILE, "rb") as f:
+            return f.read().decode()
+    except FileNotFoundError:
+        print("[ERROR] Master key not found. Make sure 'master.key' is in this folder.")
+        exit(1)
+
+def listen_for_messages(client, cipher):
+    """Listens for incoming messages and prints them."""
     while True:
         try:
-            message = client_socket.recv(1024)
-            if not message:
+            encrypted_response = client.recv(1024)
+            if encrypted_response:
+                decrypted_response = cipher.decrypt(encrypted_response).decode()
+                print(decrypted_response)
+            else:
                 break
-            print(cipher.decrypt(message).decode())
         except:
-            print("Disconnected from server.")
             break
 
 def start_client():
-    """Connects to the server and starts sending messages."""
-
-    # Display the welcome message
     display_welcome_message()
-
-    # Prompt user for server details
-    host = input("Enter chat server IP address: ")
-    port = int(input("Enter chat server port number: "))
-
+    host = input("Enter server IP address: ")
+    port = int(input("Enter server port number: "))
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
     try:
         client.connect((host, port))
-    except:
-        print("Failed to connect to the server. Check the IP and port.")
-        return
 
-    # Receive encryption key from server
-    encryption_key = client.recv(1024)
-    cipher = Fernet(encryption_key)
+        # Receive and decrypt the session key
+        encrypted_session_key = client.recv(1024)
+        master_key = load_master_key()
+        session_key = Fernet(master_key).decrypt(encrypted_session_key)
+        session_cipher = Fernet(session_key)
 
-    # Enter username and check if it's unique
-    while True:
-        response = cipher.decrypt(client.recv(1024)).decode()
-        if response == "ENTER_USERNAME":
-            username = input("Enter your username: ")
-            client.send(cipher.encrypt(username.encode()))
-        elif response == "USERNAME_TAKEN":
-            print("This username is already taken. Please choose another.")
-        elif response == "USERNAME_ACCEPTED":
-            break
+        # Send username
+        username = input("Enter your username: ")
+        client.send(session_cipher.encrypt(username.encode()))
 
-    # Server password authentication (3 attempts)
-    attempts = 0
-    while attempts < 3:
-        response = cipher.decrypt(client.recv(1024)).decode()
-        if response == "ENTER_PASSWORD":
-            password = getpass.getpass("Enter server password: ")
-            client.send(cipher.encrypt(password.encode()))
-            response = cipher.decrypt(client.recv(1024)).decode()
+        # Start listener thread
+        listener = threading.Thread(target=listen_for_messages, args=(client, session_cipher))
+        listener.daemon = True
+        listener.start()
 
-            if response == "AUTHENTICATION_SUCCESSFUL":
-                break
-            elif response == "INVALID_PASSWORD":
-                attempts += 1
-                if attempts == 3:
-                    print("Incorrect password entered 3 times. Closing connection.")
-                    client.close()
-                    return
-                else:
-                    print(f"Incorrect password. You have {3 - attempts} attempts left.")
-
-    print("Connected to the chat server. Type messages and press Enter to send.")
-
-    # Start a thread to receive messages
-    thread = threading.Thread(target=receive_messages, args=(client, cipher))
-    thread.start()
-
-    try:
+        print("Enter message to send (type 'exit' to quit):")
         while True:
             message = input()
-            if message.lower() == "exit":
+            if message.lower() == 'exit':
                 break
-            client.send(cipher.encrypt(message.encode()))
-    except KeyboardInterrupt:
-        print("Exiting...")
+            full_message = f"{username}: {message}"
+            encrypted_message = session_cipher.encrypt(full_message.encode())
+            client.send(encrypted_message)
+
+    except Exception as e:
+        print(f"[ERROR] Connection failed: {e}")
     finally:
         client.close()
 

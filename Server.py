@@ -1,120 +1,91 @@
-import os
 import socket
 import threading
 from cryptography.fernet import Fernet
+import uuid
+import os
 
-# Server configuration
+# Configuration
 HOST = '127.0.0.1'
 PORT = 5555
+MASTER_KEY_FILE = "master.key"
 
-# Retrieve server password from environment variable
-SERVER_PASSWORD = os.getenv("CHAT_SERVER_PASSWORD")
+clients = {}  # Stores client info by session ID
 
-if not SERVER_PASSWORD:
-    raise ValueError("SERVER_PASSWORD is not set. Please configure it as an environment variable.")
+def load_or_create_master_key():
+    """Loads the master key from file or creates a new one if it doesn't exist."""
+    if not os.path.exists(MASTER_KEY_FILE):
+        key = Fernet.generate_key()
+        with open(MASTER_KEY_FILE, "wb") as f:
+            f.write(key)
+    with open(MASTER_KEY_FILE, "rb") as f:
+        return f.read().decode()
 
-# Generate encryption key
-encryption_key = Fernet.generate_key()
-cipher = Fernet(encryption_key)
-
-clients = {}  # Stores client sockets mapped to usernames
-usernames = set()  # Stores active usernames
-
-def encrypt_message(message):
-    """Encrypts a message before sending."""
-    return cipher.encrypt(message.encode())
-
-def decrypt_message(message):
-    """Decrypts a received message."""
-    return cipher.decrypt(message).decode()
+def list_usernames():
+    """Returns a list of all connected usernames."""
+    return [data['username'] for data in clients.values()]
 
 def handle_client(client_socket, addr):
-    """Handles communication with a connected client."""
-    print(f"[NEW CONNECTION] {addr} is attempting to connect.")
+    """Handles communication with a single connected client."""
+    session_id = str(uuid.uuid4())
+    session_key = Fernet.generate_key()
 
-    # Send encryption key
-    client_socket.send(encryption_key)
+    # Encrypt session key with master key and send to client
+    encrypted_session_key = Fernet(master_key).encrypt(session_key)
+    client_socket.send(encrypted_session_key)
 
-    # Request and validate username
-    username = None
-    while True:
-        client_socket.send(encrypt_message("ENTER_USERNAME"))
-        username = decrypt_message(client_socket.recv(1024))
+    client_cipher = Fernet(session_key)
 
-        if username in usernames:
-            client_socket.send(encrypt_message("USERNAME_TAKEN"))
-        else:
-            usernames.add(username)
-            clients[client_socket] = username
-            client_socket.send(encrypt_message("USERNAME_ACCEPTED"))
-            break
+    # Receive and store client's username
+    username = client_cipher.decrypt(client_socket.recv(1024)).decode()
+    clients[session_id] = {
+        'username': username,
+        'socket': client_socket,
+        'session_key': session_key
+    }
 
-    # Request and verify the server password
-    attempts = 0
-    while attempts < 3:
-        client_socket.send(encrypt_message("ENTER_PASSWORD"))
-        password = decrypt_message(client_socket.recv(1024))
-
-        if password == SERVER_PASSWORD:
-            client_socket.send(encrypt_message("AUTHENTICATION_SUCCESSFUL"))
-            break
-        else:
-            attempts += 1
-            if attempts == 3:
-                client_socket.send(encrypt_message("INVALID_PASSWORD"))
-                usernames.discard(username)  # Remove username from active set
-                clients.pop(client_socket, None)  # Remove client from list safely
-                client_socket.close()
-                print(f"[FAILED] {addr} failed password authentication after 3 attempts.")
-                return
-            else:
-                client_socket.send(encrypt_message("INVALID_PASSWORD"))
-    if len(usernames) == 1:
-        broadcast("You are the only member in this chat right now.", "SERVER")
+    # Notify others of new user
+    if len(clients) > 1:
+        join_message = f"{username} has joined the chat. Members: {', '.join(list_usernames())}"
     else:
-        broadcast(f"{username} has joined the chat. Current members: {", ".join(usernames)}.", "SERVER")
+        join_message = "You are currently the only user in the chat."
+    broadcast_message(session_id, join_message, broadcast_to_all=True)
 
     try:
         while True:
-            message = decrypt_message(client_socket.recv(1024))
-            if not message:
+            encrypted_message = client_socket.recv(1024)
+            if not encrypted_message:
                 break
-            broadcast(f"{username}: {message}", client_socket)
-    except:
+
+            message = client_cipher.decrypt(encrypted_message).decode()
+            broadcast_message(session_id, message)
+
+    except Exception:
         pass
     finally:
-        usernames.discard(username)
-        if len(usernames) == 1:
-            broadcast(f"{username} has left the chat. You are now the only member in this chat.", "SERVER")
-        else:
-            broadcast(f"{username} has left the chat Current members: {", ".join(usernames)}.", "SERVER")
-        clients.pop(client_socket, None)
+        broadcast_message(session_id, f"{clients[session_id]['username']} has left the chat.")
+        del clients[session_id]
         client_socket.close()
 
-def broadcast(message, exclude_client=None):
-    """Sends an encrypted message to all connected clients, except the sender."""
-    encrypted_message = encrypt_message(message)
-    
-    for client in list(clients.keys()):
-        if client != exclude_client:  # Exclude the sender from receiving the message
+def broadcast_message(sender_id, message, broadcast_to_all=False):
+    """Encrypts and sends a message to all clients except the sender (unless broadcast_to_all is True)."""
+    for session_id, client_data in clients.items():
+        if session_id != sender_id or broadcast_to_all:
             try:
-                client.send(encrypted_message)
-            except:
-                client.close()
-                clients.pop(client, None)  # Safely remove disconnected clients
+                encrypted_message = Fernet(client_data['session_key']).encrypt(message.encode())
+                client_data['socket'].send(encrypted_message)
+            except Exception:
+                continue
 
 def start_server():
-    """Starts the chat server."""
+    """Starts the server and listens for incoming connections."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen(5)
-
-    print(f"[LISTENING] Server is listening on {HOST}:{PORT}")
-
     while True:
         client_socket, addr = server.accept()
         thread = threading.Thread(target=handle_client, args=(client_socket, addr))
         thread.start()
 
 if __name__ == "__main__":
+    master_key = load_or_create_master_key()
     start_server()
