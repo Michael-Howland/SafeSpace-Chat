@@ -2,8 +2,18 @@ import socket
 from cryptography.fernet import Fernet
 import threading
 import os
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.shortcuts import clear
+import sys
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    # Running in a PyInstaller bundle
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # Running in a normal Python environment
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 MASTER_KEY_FILE = os.path.join(BASE_DIR, "master.key")
 
 def display_welcome_message():
@@ -21,14 +31,17 @@ def load_master_key():
         print("[ERROR] Master key not found. Make sure 'master.key' is in this folder.")
         exit(1)
 
-def listen_for_messages(client, cipher):
-    """Listens for incoming messages and prints them."""
+def listen_for_messages(client, cipher, session):
+    """Listen for messages and redraw prompt preserving user input."""
     while True:
         try:
             encrypted_response = client.recv(1024)
             if encrypted_response:
                 decrypted_response = cipher.decrypt(encrypted_response).decode()
-                print(decrypted_response)
+
+                # Thread-safe way to print while prompt is active
+                with patch_stdout():
+                    print(f"\r{decrypted_response}")
             else:
                 break
         except:
@@ -42,24 +55,25 @@ def start_client():
     try:
         client.connect((host, port))
 
-        # Receive and decrypt the session key
         encrypted_session_key = client.recv(1024)
         master_key = load_master_key()
         session_key = Fernet(master_key).decrypt(encrypted_session_key)
         session_cipher = Fernet(session_key)
 
-        # Send username
-        username = input("Enter your username: ")
+        session = PromptSession()
+
+        username = session.prompt("Enter your username: ")
         client.send(session_cipher.encrypt(username.encode()))
 
-        # Start listener thread
-        listener = threading.Thread(target=listen_for_messages, args=(client, session_cipher))
+        # Start the listener thread
+        listener = threading.Thread(target=listen_for_messages, args=(client, session_cipher, session))
         listener.daemon = True
         listener.start()
 
-        print("Enter message to send (type 'exit' to quit):")
+        print("Type your messages below (type 'exit' to quit):")
         while True:
-            message = input()
+            with patch_stdout():  # Prevent output overlap
+                message = session.prompt("You: ")
             if message.lower() == 'exit':
                 break
             full_message = f"{username}: {message}"
